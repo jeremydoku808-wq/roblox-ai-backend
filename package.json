@@ -1,0 +1,17 @@
+{
+  "name": "roblox-ai-backend",
+  "version": "1.0.0",
+  "description": "Backend die Roblox chatberichten doorstuurt naar Claude en tool-calls teruggeeft",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
