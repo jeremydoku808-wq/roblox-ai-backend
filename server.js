@@ -1,82 +1,95 @@
 import express from "express";
-import Anthropic from "@anthropic-ai/sdk";
+import Groq from "groq-sdk";
 
 const app = express();
 app.use(express.json());
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
 });
 
-const MODEL = "claude-sonnet-5"; // wissel naar "claude-haiku-4-5-20251001" voor sneller/goedkoper
+const MODEL = "llama-3.3-70b-versatile"; // gratis, snel, ondersteunt tool-calling
 
 // ---------------------------------------------------------------------------
 // 1. TOOLS: dit is de VOLLEDIGE lijst dingen die de AI mag doen.
 //    De AI kan NOOIT iets buiten deze lijst uitvoeren, wat er ook in de chat
 //    getypt wordt. Dit is je belangrijkste veiligheidsgrens.
+//    (Groq gebruikt hetzelfde tool-format als OpenAI: type "function".)
 // ---------------------------------------------------------------------------
 const tools = [
   {
-    name: "spawn_part",
-    description: "Maak een nieuw blok/onderdeel (Part) in de wereld.",
-    input_schema: {
-      type: "object",
-      properties: {
-        shape: { type: "string", enum: ["Block", "Ball", "Cylinder", "Wedge"] },
-        color: { type: "string", description: "Kleurnaam, bv. 'Bright red' of hex zoals '#FF0000'" },
-        material: { type: "string", description: "bv. Plastic, Wood, Neon, Metal, Glass" },
-        size: {
-          type: "object",
-          properties: {
-            x: { type: "number" }, y: { type: "number" }, z: { type: "number" },
+    type: "function",
+    function: {
+      name: "spawn_part",
+      description: "Maak een nieuw blok/onderdeel (Part) in de wereld.",
+      parameters: {
+        type: "object",
+        properties: {
+          shape: { type: "string", enum: ["Block", "Ball", "Cylinder", "Wedge"] },
+          color: { type: "string", description: "Kleurnaam, bv. 'Bright red' of hex zoals '#FF0000'" },
+          material: { type: "string", description: "bv. Plastic, Wood, Neon, Metal, Glass" },
+          size: {
+            type: "object",
+            properties: {
+              x: { type: "number" }, y: { type: "number" }, z: { type: "number" },
+            },
+            required: ["x", "y", "z"],
           },
-          required: ["x", "y", "z"],
-        },
-        position: {
-          type: "object",
-          properties: {
-            x: { type: "number" }, y: { type: "number" }, z: { type: "number" },
+          position: {
+            type: "object",
+            properties: {
+              x: { type: "number" }, y: { type: "number" }, z: { type: "number" },
+            },
+            required: ["x", "y", "z"],
           },
-          required: ["x", "y", "z"],
+          anchored: { type: "boolean", description: "Blijft het blok los in de lucht hangen (true) of valt het (false)?" },
         },
-        anchored: { type: "boolean", description: "Blijft het blok los in de lucht hangen (true) of valt het (false)?" },
+        required: ["shape", "size", "position"],
       },
-      required: ["shape", "size", "position"],
     },
   },
   {
-    name: "create_gui",
-    description: "Toon een simpel GUI-scherm (tekst + eventueel knoppen) aan de speler.",
-    input_schema: {
-      type: "object",
-      properties: {
-        title: { type: "string" },
-        text: { type: "string" },
-        buttons: {
-          type: "array",
-          items: { type: "string" },
-          description: "Optionele lijst knop-labels, max 4",
+    type: "function",
+    function: {
+      name: "create_gui",
+      description: "Toon een simpel GUI-scherm (tekst + eventueel knoppen) aan de speler.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          text: { type: "string" },
+          buttons: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optionele lijst knop-labels, max 4",
+          },
         },
+        required: ["title", "text"],
       },
-      required: ["title", "text"],
     },
   },
   {
-    name: "play_effect",
-    description: "Speel een visueel effect af op of nabij de speler.",
-    input_schema: {
-      type: "object",
-      properties: {
-        effect: { type: "string", enum: ["sparkles", "fire", "smoke", "explosion_visual", "confetti"] },
-        duration: { type: "number", description: "seconden, max 10" },
+    type: "function",
+    function: {
+      name: "play_effect",
+      description: "Speel een visueel effect af op of nabij de speler.",
+      parameters: {
+        type: "object",
+        properties: {
+          effect: { type: "string", enum: ["sparkles", "fire", "smoke", "explosion_visual", "confetti"] },
+          duration: { type: "number", description: "seconden, max 10" },
+        },
+        required: ["effect"],
       },
-      required: ["effect"],
     },
   },
   {
-    name: "remove_last_spawned",
-    description: "Verwijder het laatste object dat deze speler heeft laten spawnen.",
-    input_schema: { type: "object", properties: {} },
+    type: "function",
+    function: {
+      name: "remove_last_spawned",
+      description: "Verwijder het laatste object dat deze speler heeft laten spawnen.",
+      parameters: { type: "object", properties: {} },
+    },
   },
 ];
 
@@ -113,30 +126,36 @@ app.post("/chat", checkAuth, async (req, res) => {
   }
 
   try {
-    const response = await anthropic.messages.create({
+    const completion = await groq.chat.completions.create({
       model: MODEL,
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      tools,
       messages: [
+        { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: `Speler "${playerName || "onbekend"}" typte: ${message}` },
       ],
+      tools,
+      tool_choice: "auto",
     });
 
+    const choice = completion.choices[0].message;
+
     // Alle tool-calls uit het antwoord halen
-    const actions = response.content
-      .filter((block) => block.type === "tool_use")
-      .map((block) => ({ tool: block.name, input: block.input }));
+    const actions = (choice.tool_calls || []).map((call) => {
+      let input = {};
+      try {
+        input = JSON.parse(call.function.arguments);
+      } catch (e) {
+        console.warn("Kon tool-arguments niet parsen:", call.function.arguments);
+      }
+      return { tool: call.function.name, input };
+    });
 
     // Losse tekst die de AI eventueel ook teruggaf (bv. een uitleg of afwijzing)
-    const textBlocks = response.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join(" ");
+    const textMessage = choice.content || "";
 
-    res.json({ actions, message: textBlocks });
+    res.json({ actions, message: textMessage });
   } catch (err) {
-    console.error("Anthropic API fout:", err);
+    console.error("Groq API fout:", err);
     res.status(500).json({ error: "AI-aanroep mislukt" });
   }
 });
