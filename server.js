@@ -109,7 +109,9 @@ Bouwen van iets met meerdere onderdelen (huis, deur, brug, etc.):
 - Gebruik de meegegeven positie van de speler als uitgangspunt (oorsprong), en bereken de
   positie van elk onderdeel daar RELATIEF aan, zodat de delen logisch op elkaar aansluiten
   in plaats van willekeurig/overlappend te spawnen.
-- Roep in zo'n geval gewoon meerdere keren spawn_part aan in één antwoord, één per onderdeel.`;
+- Je roept steeds één tool per beurt aan; na elk onderdeel krijg je een bevestiging en mag
+  je direct het volgende onderdeel aanroepen, net zolang tot de hele structuur compleet is.
+  Stop pas met tool-aanroepen als het object echt af is, en geef dan een kort tekstantwoord.`;
 
 // ---------------------------------------------------------------------------
 // 2. AUTH: alleen requests met de juiste geheime sleutel worden geaccepteerd.
@@ -140,34 +142,54 @@ app.post("/chat", checkAuth, async (req, res) => {
     : "Positie van de speler is onbekend, gebruik x=0, y=5, z=0 als oorsprong.";
 
   try {
-    const completion = await groq.chat.completions.create({
-      model: MODEL,
-      max_tokens: 2048,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: `${posText}\nSpeler "${playerName || "onbekend"}" typte: ${message}` },
-      ],
-      tools,
-      tool_choice: "auto",
-    });
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: `${posText}\nSpeler "${playerName || "onbekend"}" typte: ${message}` },
+    ];
 
-    const choice = completion.choices[0].message;
+    const allActions = [];
+    let finalText = "";
+    const MAX_ITERATIONS = 8; // veiligheidsgrens: max. onderdelen per verzoek
 
-    // Alle tool-calls uit het antwoord halen
-    const actions = (choice.tool_calls || []).map((call) => {
-      let input = {};
-      try {
-        input = JSON.parse(call.function.arguments);
-      } catch (e) {
-        console.warn("Kon tool-arguments niet parsen:", call.function.arguments);
+    for (let i = 0; i < MAX_ITERATIONS; i++) {
+      const completion = await groq.chat.completions.create({
+        model: MODEL,
+        max_tokens: 2048,
+        messages,
+        tools,
+        tool_choice: "auto",
+      });
+
+      const choice = completion.choices[0].message;
+      messages.push(choice);
+
+      if (!choice.tool_calls || choice.tool_calls.length === 0) {
+        // Model is klaar, geen verdere tools nodig
+        finalText = choice.content || "";
+        break;
       }
-      return { tool: call.function.name, input };
-    });
 
-    // Losse tekst die de AI eventueel ook teruggaf (bv. een uitleg of afwijzing)
-    const textMessage = choice.content || "";
+      // Verwerk elke tool-call van deze beurt
+      for (const call of choice.tool_calls) {
+        let input = {};
+        try {
+          input = JSON.parse(call.function.arguments);
+        } catch (e) {
+          console.warn("Kon tool-arguments niet parsen:", call.function.arguments);
+        }
+        allActions.push({ tool: call.function.name, input });
 
-    res.json({ actions, message: textMessage });
+        // Backend voert de tool niet zelf uit (dat doet Roblox), maar het
+        // model heeft wel een "tool result" nodig om door te kunnen gaan.
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify({ success: true }),
+        });
+      }
+    }
+
+    res.json({ actions: allActions, message: finalText });
   } catch (err) {
     console.error("Groq API fout:", err);
     res.status(500).json({ error: "AI-aanroep mislukt" });
